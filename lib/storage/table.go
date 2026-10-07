@@ -490,8 +490,8 @@ func (tb *table) startHistoricalMergeWatcher() {
 }
 
 func (tb *table) historicalMergeWatcher() {
-	if !isDedupEnabled() {
-		// Deduplication and retentionFilters are disabled.
+	if !isDedupEnabled() && len(tb.s.retentionFilters) == 0 {
+		// Deduplication and retention filters are disabled.
 		return
 	}
 
@@ -519,6 +519,10 @@ func (tb *table) historicalMergeWatcher() {
 				ptw.pt.isDedupScheduled.Store(true)
 				mergeScheduled = true
 			}
+			if ptw.pt.isRetentionFilterMergeNeeded() {
+				ptw.pt.isRetentionScheduled.Store(true)
+				mergeScheduled = true
+			}
 			if mergeScheduled {
 				ptwsToMerge = append(ptwsToMerge, ptw)
 			}
@@ -532,14 +536,21 @@ func (tb *table) historicalMergeWatcher() {
 				logContext = append(logContext, "removing duplicate samples")
 				logErrContext = append(logErrContext, "remove duplicate samples")
 			}
+			if pt.isRetentionScheduled.Load() {
+				logContext = append(logContext, "applying retention filters")
+				logErrContext = append(logErrContext, "apply retention filters")
+			}
 
 			logger.Infof("start %s for partition (%s, %s)", strings.Join(logContext, " and "), pt.bigPartsPath, pt.smallPartsPath)
 			if err := pt.ForceMergeAllParts(tb.stopCh); err != nil {
 				logger.Errorf("cannot %s for partition (%s, %s): %s", strings.Join(logErrContext, " and "), pt.bigPartsPath, pt.smallPartsPath, err)
+			} else if pt.isRetentionScheduled.Load() {
+				pt.markRetentionFiltersApplied()
 			}
 			logger.Infof("finished %s for partition (%s, %s) in %.3f seconds", strings.Join(logContext, " and "), pt.bigPartsPath, pt.smallPartsPath, time.Since(t).Seconds())
 
 			pt.isDedupScheduled.Store(false)
+			pt.isRetentionScheduled.Store(false)
 		}
 	}
 

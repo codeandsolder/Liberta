@@ -65,6 +65,8 @@ type Storage struct {
 	path                        string
 	cachePath                   string
 	retentionMsecs              int64
+	retentionFilters            []RetentionFilter
+	retentionFiltersConfig      string
 	futureRetentionMsecs        int64
 	maxBackfillAgeMsecs         int64
 	denyQueriesOutsideRetention bool
@@ -165,6 +167,7 @@ type Storage struct {
 // OpenOptions optional args for MustOpenStorage
 type OpenOptions struct {
 	Retention                   time.Duration
+	RetentionFilters            []RetentionFilter
 	FutureRetention             time.Duration
 	MaxBackfillAge              time.Duration
 	DenyQueriesOutsideRetention bool
@@ -202,11 +205,19 @@ func MustOpenStorage(path string, opts OpenOptions) *Storage {
 		path:                        path,
 		cachePath:                   filepath.Join(path, cacheDirname),
 		retentionMsecs:              retention.Milliseconds(),
+		retentionFilters:            append([]RetentionFilter(nil), opts.RetentionFilters...),
+		retentionFiltersConfig:      retentionFiltersConfig(opts.RetentionFilters),
 		futureRetentionMsecs:        futureRetention.Milliseconds(),
 		maxBackfillAgeMsecs:         maxBackfillAge.Milliseconds(),
 		denyQueriesOutsideRetention: opts.DenyQueriesOutsideRetention,
 		stopCh:                      make(chan struct{}),
 		idbPrefillStartSeconds:      idbPrefillStart.Milliseconds() / 1000,
+	}
+	for i := range s.retentionFilters {
+		rf := &s.retentionFilters[i]
+		if rf.retentionMsecs > s.retentionMsecs {
+			logger.Panicf("FATAL: retention filter %q has retention %s bigger than the global retention %s", rf.matchExpr, rf.Retention(), retention)
+		}
 	}
 	s.logNewSeries.Store(opts.LogNewSeries)
 
