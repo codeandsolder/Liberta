@@ -29,6 +29,7 @@ var (
 	storageDataPath = flag.String("storageDataPath", "victoria-metrics-data", "Path to storage data")
 	retentionPeriod = flagutil.NewRetentionDuration("retentionPeriod", "1M", "Data with timestamps outside the retentionPeriod is automatically deleted. The minimum retentionPeriod is 24h or 1d. "+
 		"See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#retention. See also -retentionFilter")
+	retentionFilter = flagutil.NewArrayString("retentionFilter", "Retention filter in the format 'filter:retention'. For example, '{env=\"dev\"}:3d' configures 3 days retention for matching time series. The filter uses Prometheus-compatible series selector syntax. Can be specified multiple times")
 	futureRetention = flagutil.NewRetentionDuration("futureRetention", "2d", "Data with timestamps bigger than now+futureRetention is automatically deleted. "+
 		"The minimum futureRetention is 2 days. See https://docs.victoriametrics.com/victoriametrics/single-server-victoriametrics/#retention")
 	maxBackfillAge = flagutil.NewRetentionDuration("maxBackfillAge", "0", "The maximum allowed age for the ingested samples with historical timestamps. "+
@@ -152,8 +153,10 @@ func Init(vmselectMaxConcurrentRequests int, vmselectMaxQueueDuration time.Durat
 	fs.RegisterPathFsMetrics(*storageDataPath)
 	logger.Infof("opening storage at %q with -retentionPeriod=%s", *storageDataPath, retentionPeriod)
 	startTime := time.Now()
+	retentionFiltersParsed := mustParseRetentionFilters(*retentionFilter, retentionPeriod.Duration())
 	opts := storage.OpenOptions{
 		Retention:                   retentionPeriod.Duration(),
+		RetentionFilters:            retentionFiltersParsed,
 		FutureRetention:             futureRetention.Duration(),
 		MaxBackfillAge:              maxBackfillAge.Duration(),
 		DenyQueriesOutsideRetention: *denyQueriesOutsideRetention,
@@ -620,6 +623,8 @@ func (vms *VMStorage) writeStorageMetrics(w io.Writer) {
 
 	metrics.WriteGaugeUint64(w, `vm_downsampling_partitions_scheduled`, tm.ScheduledDownsamplingPartitions)
 	metrics.WriteGaugeUint64(w, `vm_downsampling_partitions_scheduled_size_bytes`, tm.ScheduledDownsamplingPartitionsSize)
+	metrics.WriteGaugeUint64(w, `vm_retention_filters_partitions_scheduled`, tm.ScheduledRetentionFilterPartitions)
+	metrics.WriteGaugeUint64(w, `vm_retention_filters_partitions_scheduled_size_bytes`, tm.ScheduledRetentionFilterPartitionsSize)
 
 	metrics.WriteGaugeUint64(w, `vm_search_max_unique_timeseries`, uint64(vms.maxUniqueTimeSeriesCalculated))
 
@@ -627,6 +632,38 @@ func (vms *VMStorage) writeStorageMetrics(w io.Writer) {
 	metrics.WriteCounterUint64(w, `vm_metrics_metadata_storage_size_bytes`, m.MetadataStorageCurrentSizeBytes)
 	metrics.WriteCounterUint64(w, `vm_metrics_metadata_storage_max_size_bytes`, m.MetadataStorageMaxSizeBytes)
 
+}
+
+func mustParseRetentionFilters(values []string, globalRetention time.Duration) []storage.RetentionFilter {
+	if len(values) == 0 {
+		return nil
+	}
+	rfs := make([]storage.RetentionFilter, 0, len(values))
+	for _, value := range values {
+		n := strings.LastIndexByte(value, ':')
+		if n <= 0 || n == len(value)-1 {
+			logger.Fatalf("invalid -retentionFilter=%q; want 'filter:retention'", value)
+		}
+		matchExpr := value[:n]
+		retentionString := value[n+1:]
+		var d flagutil.RetentionDuration
+		if err := d.Set(retentionString); err != nil {
+			logger.Fatalf("cannot parse retention in -retentionFilter=%q: %s", value, err)
+		}
+		retention := d.Duration()
+		if retention < 24*time.Hour {
+			logger.Fatalf("retention in -retentionFilter=%q cannot be smaller than 24h", value)
+		}
+		if retention > globalRetention {
+			logger.Fatalf("retention in -retentionFilter=%q cannot exceed -retentionPeriod=%s", value, retentionPeriod)
+		}
+		rf, err := storage.NewRetentionFilter(matchExpr, retention)
+		if err != nil {
+			logger.Fatalf("cannot parse -retentionFilter=%q: %s", value, err)
+		}
+		rfs = append(rfs, rf)
+	}
+	return rfs
 }
 
 func jsonResponseError(w http.ResponseWriter, err error) {
