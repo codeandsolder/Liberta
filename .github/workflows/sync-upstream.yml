@@ -1,0 +1,67 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: liberta-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Liberta
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Rebase onto VictoriaMetrics master
+        id: rebase
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_head=$(git rev-parse HEAD)
+          git config user.name 'liberta-upstream-sync[bot]'
+          git config user.email 'liberta-upstream-sync[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/VictoriaMetrics/VictoriaMetrics.git
+          git fetch --no-tags upstream master
+          git rebase upstream/master
+          new_head=$(git rev-parse HEAD)
+          printf 'old_head=%s\n' "$old_head" >> "$GITHUB_OUTPUT"
+          if [[ "$new_head" != "$old_head" ]]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test retention fork
+        run: go test ./lib/storage ./app/vmstorage
+
+      - name: Build VictoriaMetrics
+        run: go build ./app/victoria-metrics
+
+      - name: Update main
+        if: steps.rebase.outputs.changed == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OLD_HEAD: ${{ steps.rebase.outputs.old_head }}
+        run: |
+          set -euo pipefail
+          git push \
+            --force-with-lease="refs/heads/main:${OLD_HEAD}" \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:main

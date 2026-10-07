@@ -16,11 +16,11 @@ import (
 // mergeBlockStreams returns immediately if stopCh is closed.
 //
 // rowsMerged is atomically updated with the number of merged rows during the merge.
-func mergeBlockStreams(ph *partHeader, bsw *blockStreamWriter, bsrs []*blockStreamReader, stopCh <-chan struct{}, dmis *uint64set.Set, retentionDeadline int64, rowsMerged, rowsDeleted *atomic.Uint64) error {
+func mergeBlockStreams(ph *partHeader, bsw *blockStreamWriter, bsrs []*blockStreamReader, stopCh <-chan struct{}, dmis *uint64set.Set, retentionDeadline, currentTimestamp int64, retentionFilters []RetentionFilter, mns *metricNameSearch, rowsMerged, rowsDeleted *atomic.Uint64) error {
 	ph.Reset()
 
 	bsm := bsmPool.Get().(*blockStreamMerger)
-	bsm.Init(bsrs, retentionDeadline)
+	bsm.Init(bsrs, retentionDeadline, currentTimestamp, retentionFilters, mns)
 	err := mergeBlockStreamsInternal(ph, bsw, bsm, stopCh, dmis, rowsMerged, rowsDeleted)
 	bsm.reset()
 	bsmPool.Put(bsm)
@@ -87,6 +87,17 @@ func mergeBlockStreamsInternal(ph *partHeader, bsw *blockStreamWriter, bsm *bloc
 			// Skip blocks out of the given retention.
 			localRowsDeleted += uint64(b.bh.RowsCount)
 			continue
+		}
+		if b.bh.MinTimestamp < retentionDeadline {
+			// The block straddles the retention boundary. Unmarshal it and trim
+			// the expired prefix before any of the fast paths can copy it as-is.
+			if err := b.UnmarshalData(); err != nil {
+				return fmt.Errorf("cannot unmarshal block for retention filtering: %w", err)
+			}
+			skipSamplesOutsideRetention(b, retentionDeadline, &localRowsDeleted)
+			if b.nextIdx >= len(b.timestamps) {
+				continue
+			}
 		}
 		if pendingBlockIsEmpty {
 			// Load the next block if pendingBlock is empty.
