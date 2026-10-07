@@ -4,6 +4,8 @@ import (
 	"container/heap"
 	"fmt"
 	"io"
+
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompb"
 )
 
 // blockStreamMerger is used for merging block streams.
@@ -15,6 +17,15 @@ type blockStreamMerger struct {
 
 	// Blocks with smaller timestamps are removed because of retention.
 	retentionDeadline int64
+	currentTimestamp  int64
+	retentionFilters  []RetentionFilter
+	metricNameSearch  *metricNameSearch
+
+	lastMetricID                uint64
+	lastMetricIDSet             bool
+	lastMetricRetentionDeadline int64
+	metricNameBuf               []byte
+	labels                      []prompb.Label
 
 	// Whether the call to NextBlock must be no-op.
 	nextBlockNoop bool
@@ -32,14 +43,25 @@ func (bsm *blockStreamMerger) reset() {
 	bsm.bsrHeap = bsm.bsrHeap[:0]
 
 	bsm.retentionDeadline = 0
+	bsm.currentTimestamp = 0
+	bsm.retentionFilters = nil
+	bsm.metricNameSearch = nil
+	bsm.lastMetricID = 0
+	bsm.lastMetricIDSet = false
+	bsm.lastMetricRetentionDeadline = 0
+	bsm.metricNameBuf = bsm.metricNameBuf[:0]
+	bsm.labels = bsm.labels[:0]
 	bsm.nextBlockNoop = false
 	bsm.err = nil
 }
 
 // Init initializes bsm with the given bsrs.
-func (bsm *blockStreamMerger) Init(bsrs []*blockStreamReader, retentionDeadline int64) {
+func (bsm *blockStreamMerger) Init(bsrs []*blockStreamReader, retentionDeadline, currentTimestamp int64, retentionFilters []RetentionFilter, mns *metricNameSearch) {
 	bsm.reset()
 	bsm.retentionDeadline = retentionDeadline
+	bsm.currentTimestamp = currentTimestamp
+	bsm.retentionFilters = retentionFilters
+	bsm.metricNameSearch = mns
 	for _, bsr := range bsrs {
 		if bsr.NextBlock() {
 			bsm.bsrHeap = append(bsm.bsrHeap, bsr)
@@ -61,8 +83,40 @@ func (bsm *blockStreamMerger) Init(bsrs []*blockStreamReader, retentionDeadline 
 	bsm.nextBlockNoop = true
 }
 
-func (bsm *blockStreamMerger) getRetentionDeadline(_ *blockHeader) int64 {
-	return bsm.retentionDeadline
+func (bsm *blockStreamMerger) getRetentionDeadline(bh *blockHeader) int64 {
+	if len(bsm.retentionFilters) == 0 || bsm.metricNameSearch == nil {
+		return bsm.retentionDeadline
+	}
+	metricID := bh.TSID.MetricID
+	if bsm.lastMetricIDSet && bsm.lastMetricID == metricID {
+		return bsm.lastMetricRetentionDeadline
+	}
+
+	deadline := bsm.retentionDeadline
+	bsm.metricNameBuf = bsm.metricNameBuf[:0]
+	metricNameRaw, ok := bsm.metricNameSearch.search(bsm.metricNameBuf, metricID)
+	if ok {
+		bsm.metricNameBuf = metricNameRaw
+		mn := GetMetricName()
+		if err := mn.Unmarshal(metricNameRaw); err == nil {
+			bsm.labels = metricNameToPromLabels(bsm.labels[:0], mn)
+			for i := range bsm.retentionFilters {
+				rf := &bsm.retentionFilters[i]
+				if rf.matches(bsm.labels) {
+					candidate := bsm.currentTimestamp - rf.retentionMsecs
+					if candidate > deadline {
+						deadline = candidate
+					}
+				}
+			}
+		}
+		PutMetricName(mn)
+	}
+
+	bsm.lastMetricID = metricID
+	bsm.lastMetricIDSet = true
+	bsm.lastMetricRetentionDeadline = deadline
+	return deadline
 }
 
 // NextBlock stores the next block in bsm.Block.
