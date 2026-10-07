@@ -75,7 +75,8 @@ type partition struct {
 	smallRowsDeleted    atomic.Uint64
 	bigRowsDeleted      atomic.Uint64
 
-	isDedupScheduled atomic.Bool
+	isDedupScheduled     atomic.Bool
+	isRetentionScheduled atomic.Bool
 
 	mergeIdx atomic.Uint64
 
@@ -360,8 +361,10 @@ type partitionMetrics struct {
 	SmallPartsRefCount    uint64
 	BigPartsRefCount      uint64
 
-	ScheduledDownsamplingPartitions     uint64
-	ScheduledDownsamplingPartitionsSize uint64
+	ScheduledDownsamplingPartitions        uint64
+	ScheduledDownsamplingPartitionsSize    uint64
+	ScheduledRetentionFilterPartitions     uint64
+	ScheduledRetentionFilterPartitionsSize uint64
 
 	IndexDBMetrics IndexDBMetrics
 }
@@ -378,8 +381,12 @@ func (pt *partition) UpdateMetrics(m *partitionMetrics) {
 	pt.partsLock.Lock()
 
 	isDedupScheduled := pt.isDedupScheduled.Load()
+	isRetentionScheduled := pt.isRetentionScheduled.Load()
 	if isDedupScheduled {
 		m.ScheduledDownsamplingPartitions++
+	}
+	if isRetentionScheduled {
+		m.ScheduledRetentionFilterPartitions++
 	}
 
 	for _, pw := range pt.inmemoryParts {
@@ -392,6 +399,9 @@ func (pt *partition) UpdateMetrics(m *partitionMetrics) {
 		if isDedupScheduled {
 			m.ScheduledDownsamplingPartitionsSize += p.size
 		}
+		if isRetentionScheduled {
+			m.ScheduledRetentionFilterPartitionsSize += p.size
+		}
 	}
 	for _, pw := range pt.smallParts {
 		p := pw.p
@@ -403,6 +413,9 @@ func (pt *partition) UpdateMetrics(m *partitionMetrics) {
 		if isDedupScheduled {
 			m.ScheduledDownsamplingPartitionsSize += p.size
 		}
+		if isRetentionScheduled {
+			m.ScheduledRetentionFilterPartitionsSize += p.size
+		}
 	}
 	for _, pw := range pt.bigParts {
 		p := pw.p
@@ -413,6 +426,9 @@ func (pt *partition) UpdateMetrics(m *partitionMetrics) {
 		m.BigPartsRefCount += uint64(pw.refCount.Load())
 		if isDedupScheduled {
 			m.ScheduledDownsamplingPartitionsSize += p.size
+		}
+		if isRetentionScheduled {
+			m.ScheduledRetentionFilterPartitionsSize += p.size
 		}
 	}
 
@@ -1246,7 +1262,7 @@ func (pt *partition) mergeParts(pws []*partWrapper, stopCh <-chan struct{}, isFi
 	mergeIdx := pt.nextMergeIdx()
 	dstPartPath := pt.getDstPartPath(dstPartType, mergeIdx)
 
-	if !isDedupEnabled() && isFinal && len(pws) == 1 && pws[0].mp != nil {
+	if !isDedupEnabled() && len(pt.s.retentionFilters) == 0 && isFinal && len(pws) == 1 && pws[0].mp != nil {
 		// Fast path: flush a single in-memory part to disk.
 		mp := pws[0].mp
 		mp.MustStoreToDisk(dstPartPath)
@@ -1426,9 +1442,13 @@ func (pt *partition) mergePartsInternal(dstPartPath string, bsw *blockStreamWrit
 	}
 	retentionDeadline := currentTimestamp - pt.s.retentionMsecs
 	activeMerges.Add(1)
-	_ = useSparseCache // unused in OSS version.
+	var mns *metricNameSearch
+	if len(pt.s.retentionFilters) > 0 {
+		mns = getMetricNameSearch(pt.s, pt.tr, useSparseCache)
+		defer putMetricNameSearch(mns)
+	}
 	dmis := pt.idb.getDeletedMetricIDs()
-	err := mergeBlockStreams(&ph, bsw, bsrs, stopCh, dmis, retentionDeadline, rowsMerged, rowsDeleted)
+	err := mergeBlockStreams(&ph, bsw, bsrs, stopCh, dmis, retentionDeadline, currentTimestamp, pt.s.retentionFilters, mns, rowsMerged, rowsDeleted)
 	activeMerges.Add(-1)
 	mergesCount.Add(1)
 	if err != nil {
@@ -1439,6 +1459,27 @@ func (pt *partition) mergePartsInternal(dstPartPath string, bsw *blockStreamWrit
 		ph.MustWriteMetadata(dstPartPath)
 	}
 	return &ph, nil
+}
+
+func (pt *partition) isRetentionFilterMergeNeeded() bool {
+	if pt.s.retentionFiltersConfig == "" {
+		return false
+	}
+	want := pt.s.retentionFiltersConfig
+	for _, dir := range []string{pt.smallPartsPath, pt.bigPartsPath} {
+		data, err := os.ReadFile(filepath.Join(dir, appliedRetentionFilename))
+		if err != nil || string(data) != want {
+			return true
+		}
+	}
+	return false
+}
+
+func (pt *partition) markRetentionFiltersApplied() {
+	data := []byte(pt.s.retentionFiltersConfig)
+	for _, dir := range []string{pt.smallPartsPath, pt.bigPartsPath} {
+		fs.MustWriteAtomic(filepath.Join(dir, appliedRetentionFilename), data, true)
+	}
 }
 
 func (pt *partition) openCreatedPart(ph *partHeader, pws []*partWrapper, mpNew *inmemoryPart, dstPartPath string) *partWrapper {
