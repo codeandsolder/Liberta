@@ -1,6 +1,6 @@
 {
   "source": "VictoriaMetrics/VictoriaMetrics:master",
-  "lastAttempt": 1795527708575,
+  "lastAttempt": 1795527713092,
   "observations": [
     {
       "sha": "1cc50e8a514bb5bd8d4486a7c26a1ca5d539cafc",
@@ -9,6 +9,10 @@
     {
       "sha": "35c475a27d68c37533a62da69b4501199dda8983",
       "firstObserved": 1795437366045
+    },
+    {
+      "sha": "bd26d57fb093224f497413addbffb588e8c4e9a9",
+      "firstObserved": 1795527713092
     }
   ]
 }
