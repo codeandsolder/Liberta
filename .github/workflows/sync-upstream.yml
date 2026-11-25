@@ -11,12 +11,12 @@ permissions:
 
 jobs:
   sync:
-    uses: codeandsolder/ci-workflows/.github/workflows/upstream-tracking.yml@7df510a2053e220c010c331b5daef81a593a19bb # main
+    uses: codeandsolder/ci-workflows/.github/workflows/upstream-tracking.yml@f0267b6ece698276d68775f04293665f5b7e32c7 # main
     with:
       upstream-repository: VictoriaMetrics/VictoriaMetrics
       upstream-branch: master
       target-branch: main
-      strategy: rebase
+      workflow-policy: preserve
       go: true
       go-version-file: go.mod
       validation-script: .github/scripts/validate-upstream.sh
