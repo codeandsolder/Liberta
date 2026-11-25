@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   sync:
-    uses: codeandsolder/ci-workflows/.github/workflows/upstream-tracking.yml@1c9f5c8968c4caf8754c98ebeb0889d9e774b5ed # main
+    uses: codeandsolder/ci-workflows/.github/workflows/upstream-tracking.yml@7df510a2053e220c010c331b5daef81a593a19bb # main
     with:
       upstream-repository: VictoriaMetrics/VictoriaMetrics
       upstream-branch: master
